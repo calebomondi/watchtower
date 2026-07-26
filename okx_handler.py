@@ -1,147 +1,257 @@
 """
-OKX AI Agent Handler for WatchTower
+WatchTower — OKX AI Agent Handler
 
-Bridges XMTP messages from okx-a2a daemon to WatchTower's analysis logic.
-When a task is assigned to WatchTower via the OKX AI marketplace, this handler
-processes it using the expert opinion agent.
+Processes marketplace tasks directly using WatchTower's expert opinion agent.
 """
 
-import asyncio
 import json
 import logging
 import subprocess
-import sys
+import os
+import uuid
 from typing import Any
 
 logger = logging.getLogger("watchtower.okx-handler")
 
-# Import WatchTower's agent
-try:
-    from experts_opinion_agent import build_agent
-    watchtower_agent = build_agent()
-    WATCHTOWER_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"WatchTower agent not available: {e}")
-    WATCHTOWER_AVAILABLE = False
+AGENT_ID = os.getenv("OKX_AGENT_ID", "9643")
 
 
-def run_onchainos_command(args: list[str]) -> dict:
-    """Run an onchainos CLI command and return the result."""
+# ── onchainos CLI wrapper ──────────────────────────────────────────────────────
+
+def run_cli(args: list[str], timeout: int = 300) -> dict:
+    """Run an onchainos CLI command and return parsed JSON."""
     cmd = ["onchainos"] + args
+    logger.info(f"CLI: {' '.join(cmd[:8])}...")
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        if result.returncode == 0:
-            return json.loads(result.stdout) if result.stdout.strip() else {"ok": True}
-        else:
-            return {"ok": False, "error": result.stderr}
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.stdout.strip():
+            return json.loads(result.stdout)
+        if result.returncode != 0:
+            return {"ok": False, "error": result.stderr or f"exit code {result.returncode}"}
+        return {"ok": True}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Command timed out"}
-    except json.JSONDecodeError:
-        return {"ok": False, "error": "Invalid JSON response"}
+        return {"ok": False, "error": "timeout"}
+    except json.JSONDecodeError as e:
+        return {"ok": False, "error": f"bad json: {e}", "raw": result.stdout[:500]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-def handle_task_event(agent_id: str, message: dict) -> dict:
-    """
-    Handle a system event from the okx-a2a daemon.
-    
-    This is called when a task-related event occurs (job created, accepted, etc.)
-    """
-    logger.info(f"Handling task event for agent {agent_id}: {message.get('event', 'unknown')}")
-    
-    # Run next-action to get the action script
-    result = run_onchainos_command([
+def next_action(agent_id: str, message: dict) -> dict:
+    return run_cli([
         "agent", "next-action",
-        "--role", "auto",
+        "--role", "asp",
         "--agent-id", agent_id,
-        "--message", json.dumps(message)
+        "--message", json.dumps(message),
     ])
-    
-    if not result.get("ok"):
-        logger.error(f"next-action failed: {result.get('error')}")
-        return result
-    
-    # The result contains a script to execute
-    script = result.get("data", {}).get("script", "")
-    if script:
-        logger.info(f"Executing action script: {script[:100]}...")
-        # Execute the script (this would be the CLI commands from next-action)
-        # For now, log it - in production, you'd parse and execute
-        return {"ok": True, "action": "script_ready", "script": script}
-    
-    return {"ok": True, "action": "no_action_needed"}
 
 
-def handle_a2a_chat(agent_id: str, job_id: str, sender_role: int, content: str) -> dict:
+def deliver(agent_id: str, job_id: str, text: str) -> dict:
+    """Submit a text deliverable for a job."""
+    return run_cli([
+        "agent", "deliver",
+        "--agent-id", agent_id,
+        job_id,
+        "--deliverable-text", text,
+        "--message", "WatchTower analysis complete",
+    ])
+
+
+def apply_for_job(agent_id: str, job_id: str, amount: str, symbol: str) -> dict:
+    """Apply for a job with a quoted price."""
+    return run_cli([
+        "agent", "apply",
+        "--agent-id", agent_id,
+        job_id,
+        "--token-amount", amount,
+        "--token-symbol", symbol,
+    ])
+
+
+def xmtp_send(job_id: str, to_agent_id: str, message: str) -> dict:
+    """Send a peer message via XMTP."""
+    return run_cli([
+        "okx-a2a", "xmtp-send",
+        "--job-id", job_id,
+        "--to-agent-id", to_agent_id,
+        "--message", message,
+    ], timeout=60)
+
+
+# ── WatchTower agent ───────────────────────────────────────────────────────────
+
+def run_watchtower(question: str) -> str:
     """
-    Handle an agent-to-agent chat message.
-    
-    This is called when another agent sends a message (e.g., task description).
+    Run WatchTower's expert opinion agent on a prediction market question.
+    Returns the analysis as a string.
     """
-    logger.info(f"Handling A2A chat for agent {agent_id}, job {job_id}")
-    
-    # If WatchTower agent is available and this is a task request, process it
-    if WATCHTOWER_AVAILABLE and sender_role == 1:  # sender_role 1 = User Agent
-        try:
-            # Run WatchTower's analysis
-            result = watchtower_agent.invoke({
-                "messages": [{"role": "user", "content": content}]
-            })
-            
-            # Extract the response
-            response = result.get("messages", [{}])[-1].get("content", "")
-            
-            # Deliver the result via onchainos
-            deliver_result = run_onchainos_command([
-                "agent", "deliver",
-                "--agent-id", agent_id,
-                "--job-id", job_id,
-                "--content", response
-            ])
-            
-            return deliver_result
-        except Exception as e:
-            logger.error(f"WatchTower analysis failed: {e}")
-            return {"ok": False, "error": str(e)}
-    
-    return {"ok": True, "action": "delegated_to_daemon"}
+    try:
+        from experts_opinion_agent import build_agent
+        agent = build_agent()
+        # LangGraph checkpointer needs a thread_id
+        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        # The agent uses a StateGraph with a `topic` field, not `messages`
+        result = agent.invoke(
+            {"topic": question, "max_analysts": 3},
+            config=config,
+        )
+        # The agent returns a final_output JSON string
+        output = result.get("final_output", "")
+        if output:
+            return output
+        # Fallback: return the decision fields
+        return json.dumps({
+            "decision": result.get("final_decision", "MAYBE"),
+            "confidence": result.get("confidence", 0),
+            "reasoning": result.get("reasoning", ""),
+            "sources": result.get("sources", []),
+        })
+    except Exception as e:
+        logger.error(f"WatchTower agent error: {e}")
+        return json.dumps({"error": str(e)})
 
 
-# Webhook endpoint for okx-a2a to notify about tasks
+# ── Task event handlers ────────────────────────────────────────────────────────
+
+def handle_job_asp_selected(agent_id: str, event: dict) -> dict:
+    """
+    A user selected us for their task.
+    Auto-apply with our service fee (0.5 USDT).
+    """
+    job_id = event.get("jobId")
+    job_title = event.get("jobTitle", "prediction market analysis")
+    logger.info(f"Job selected: {job_id} — {job_title}")
+
+    # Our service fee is 0.5 USDT per call
+    result = apply_for_job(agent_id, job_id, "0.5", "USDT")
+    logger.info(f"Apply result: {result}")
+    return result
+
+
+def handle_job_accepted(agent_id: str, event: dict) -> dict:
+    """
+    Our application was accepted. Escrow is funded.
+    Now we do the research and deliver.
+    """
+    job_id = event.get("jobId")
+    job_title = event.get("jobTitle", "")
+    job_description = event.get("jobDescription", event.get("description", ""))
+    logger.info(f"Job accepted: {job_id} — running WatchTower analysis")
+
+    # Run WatchTower's research agent
+    question = job_description or job_title or "Analyze this prediction market question"
+    analysis = run_watchtower(question)
+
+    # Deliver the result
+    result = deliver(agent_id, job_id, analysis)
+    logger.info(f"Deliver result: {result}")
+    return result
+
+
+def handle_user_message(agent_id: str, event: dict) -> dict:
+    """User sent us a message — analyze and respond."""
+    job_id = event.get("jobId")
+    content = event.get("content", "")
+    sender = event.get("sender", {})
+    sender_id = sender.get("agentId", "")
+
+    logger.info(f"User message on job {job_id}: {content[:100]}...")
+
+    # Run WatchTower analysis
+    analysis = run_watchtower(content)
+
+    # Send response via XMTP
+    if sender_id:
+        result = xmtp_send(job_id, sender_id, analysis)
+    else:
+        result = {"ok": True, "note": "no sender_id, analysis ready but not sent"}
+    return result
+
+
+def handle_next_action_fallback(agent_id: str, event: dict) -> dict:
+    """Use next-action CLI to determine what to do."""
+    result = next_action(agent_id, event)
+    logger.info(f"next-action result: {json.dumps(result)[:300]}")
+
+    # If next-action returns a script, we could parse and execute it
+    # For now, just return the result
+    return result
+
+
+# ── Dispatch table ─────────────────────────────────────────────────────────────
+
+EVENT_HANDLERS = {
+    "JobAspSelected":        handle_job_asp_selected,
+    "JobAccepted":           handle_job_accepted,
+    "user_message":          handle_user_message,
+}
+
+TERMINAL_EVENTS = {
+    "JobSubmitted", "JobRejected", "JobDisputed",
+    "JobComplete", "JobClosed", "JobExpired", "JobFailed",
+    "sub_complete_notify", "sub_close_notify", "sub_failed_notify",
+}
+
+
+def handle_event(agent_id: str, event: dict) -> dict:
+    """Dispatch a system event to the appropriate handler."""
+    event_type = event.get("event", "unknown")
+    logger.info(f"Event: {event_type}")
+
+    if event_type in TERMINAL_EVENTS:
+        logger.info(f"Terminal event {event_type} — display only")
+        return {"ok": True, "action": "display_only"}
+
+    handler = EVENT_HANDLERS.get(event_type)
+    if handler:
+        return handler(agent_id, event)
+
+    # Unknown event — use next-action as fallback
+    return handle_next_action_fallback(agent_id, event)
+
+
+def handle_a2a_chat(agent_id: str, message: dict) -> dict:
+    """Handle an a2a-agent-chat message."""
+    job_id = message.get("jobId", "")
+    content = message.get("content", "")
+    sender = message.get("sender", {})
+    sender_role = sender.get("role", 0)
+    sender_id = sender.get("agentId", "")
+
+    # Terminal: user rejected
+    if content.startswith("[user_rejected]"):
+        logger.info(f"User rejected on job {job_id}")
+        return {"ok": True, "action": "rejected"}
+
+    # User Agent (role 1) sent us a message
+    if sender_role == 1:
+        return handle_user_message(agent_id, {
+            "jobId": job_id,
+            "content": content,
+            "sender": {"agentId": sender_id, "role": sender_role},
+        })
+
+    return {"ok": True, "action": "ignored"}
+
+
+# ── Webhook entry point ────────────────────────────────────────────────────────
+
 async def process_webhook(payload: dict) -> dict:
     """
-    Process a webhook notification from okx-a2a daemon.
-    
-    Expected payload format:
-    {
-        "agentId": "9643",
-        "event": "job_created" | "job_accepted" | ...,
-        "message": { ... }
-    }
+    Entry point called by web.py when the okx-a2a daemon sends a notification.
+
+    Payload shapes:
+      System event:  { "agentId": "9643", "message": { "source": "system", "event": "...", ... } }
+      A2A chat:      { "agentId": "9643", "message": { "msgType": "a2a-agent-chat", ... } }
     """
-    agent_id = payload.get("agentId")
-    event = payload.get("event")
+    agent_id = payload.get("agentId", AGENT_ID)
     message = payload.get("message", {})
-    
-    if not agent_id:
-        return {"ok": False, "error": "Missing agentId"}
-    
-    if event:
-        return handle_task_event(agent_id, message)
-    
-    # Check for a2a-agent-chat
+
+    if message.get("source") == "system" and message.get("event"):
+        return handle_event(agent_id, message)
+
     if message.get("msgType") == "a2a-agent-chat":
-        return handle_a2a_chat(
-            agent_id=agent_id,
-            job_id=message.get("jobId", ""),
-            sender_role=message.get("sender", {}).get("role", 0),
-            content=message.get("content", "")
-        )
-    
-    return {"ok": True, "action": "unhandled_event"}
+        return handle_a2a_chat(agent_id, message)
+
+    logger.warning(f"Unrecognized payload: {json.dumps(payload)[:200]}")
+    return {"ok": False, "error": "unrecognized payload"}
