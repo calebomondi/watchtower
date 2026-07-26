@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: watchtower
+    runtime: python
+    buildCommand: |
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      apt-get install -y nodejs
+      npm i -g @okxweb3/a2a-node
+      curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh
+      pip install uv && uv sync --frozen
+    startCommand: bash start.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: PATH
+        value: "/opt/render/project/.venv/bin:/home/mokuaxv/.local/bin:/usr/local/bin:/usr/bin:/bin"
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DASHSCOPE_API_KEY
+        sync: false
+      - key: DASHSCOPE_BASE_URL
+        value: "https://ws-c8feaezgm1qadjxf.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
