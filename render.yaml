@@ -5,6 +5,9 @@ services:
     buildCommand: |
       curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
       apt-get install -y nodejs
+      mkdir -p ~/.npm-global
+      npm config set prefix ~/.npm-global
+      export PATH="$HOME/.npm-global/bin:$PATH"
       npm i -g @okxweb3/a2a-node
       curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh
       pip install uv && uv sync --frozen
@@ -13,7 +16,7 @@ services:
       - key: PYTHON_VERSION
         value: "3.12"
       - key: PATH
-        value: "/opt/render/project/.venv/bin:/home/mokuaxv/.local/bin:/usr/local/bin:/usr/bin:/bin"
+        value: "/opt/render/project/.venv/bin:/home/mokuaxv/.npm-global/bin:/home/mokuaxv/.local/bin:/usr/local/bin:/usr/bin:/bin"
       - key: GOOGLE_API_KEY
         sync: false
       - key: GROQ_API_KEY
