@@ -27,5 +27,7 @@ services:
         value: "https://ws-c8feaezgm1qadjxf.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
       - key: TAVILY_API_KEY
         sync: false
+      - key: OKX_A2A_AI_PROVIDER
+        value: "openclaw"
       - key: OPENAI_API_KEY
         sync: false
