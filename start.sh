@@ -25,22 +25,9 @@ else
 fi
 
 # Start okx-a2a daemon in background (non-blocking, non-fatal)
-if command -v okx-a2a &> /dev/null; then
-    echo "🔄 Starting okx-a2a daemon..."
-    okx-a2a daemon start --ai-provider "${OKX_A2A_AI_PROVIDER:-openclaw}" &
-
-    # Wait a moment for daemon to initialize
-    sleep 3
-
-    # Check daemon status
-    if okx-a2a daemon status 2>/dev/null | head -1 | grep -q 'running'; then
-        echo "✅ okx-a2a daemon running"
-    else
-        echo "⚠️  okx-a2a daemon may not be running (non-fatal)"
-    fi
-else
-    echo "⚠️  okx-a2a not available, skipping daemon start"
-fi
+# Note: Hermes requires CLI login session (not available in cloud containers).
+# Skipping for now — webhook endpoint still receives task notifications.
+echo "ℹ️  Skipping okx-a2a daemon (Hermes CLI login not available on Render)"
 
 # Start FastAPI server (keeps process alive for UptimeRobot)
 echo "🌐 Starting FastAPI server..."
