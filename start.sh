@@ -27,7 +27,7 @@ fi
 # Start okx-a2a daemon in background (non-blocking, non-fatal)
 if command -v okx-a2a &> /dev/null; then
     echo "🔄 Starting okx-a2a daemon..."
-    okx-a2a daemon start &
+    okx-a2a daemon start --ai-provider "${OKX_A2A_AI_PROVIDER:-openclaw}" &
 
     # Wait a moment for daemon to initialize
     sleep 3
