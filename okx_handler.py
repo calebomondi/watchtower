@@ -8,7 +8,6 @@ import json
 import logging
 import subprocess
 import os
-import uuid
 from typing import Any
 
 logger = logging.getLogger("watchtower.okx-handler")
@@ -80,35 +79,7 @@ def xmtp_send(job_id: str, to_agent_id: str, message: str) -> dict:
 
 # ── WatchTower agent ───────────────────────────────────────────────────────────
 
-def run_watchtower(question: str) -> str:
-    """
-    Run WatchTower's expert opinion agent on a prediction market question.
-    Returns the analysis as a string.
-    """
-    try:
-        from experts_opinion_agent import build_agent
-        agent = build_agent()
-        # LangGraph checkpointer needs a thread_id
-        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-        # The agent uses a StateGraph with a `topic` field, not `messages`
-        result = agent.invoke(
-            {"topic": question, "max_analysts": 3},
-            config=config,
-        )
-        # The agent returns a final_output JSON string
-        output = result.get("final_output", "")
-        if output:
-            return output
-        # Fallback: return the decision fields
-        return json.dumps({
-            "decision": result.get("final_decision", "MAYBE"),
-            "confidence": result.get("confidence", 0),
-            "reasoning": result.get("reasoning", ""),
-            "sources": result.get("sources", []),
-        })
-    except Exception as e:
-        logger.error(f"WatchTower agent error: {e}")
-        return json.dumps({"error": str(e)})
+from main import run_watchtower  # noqa: F401 — re-exported from main.py
 
 
 # ── Task event handlers ────────────────────────────────────────────────────────
