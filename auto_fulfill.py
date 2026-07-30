@@ -67,7 +67,7 @@ def process_task(task):
     # Extract task details
     content = task.get("content", "")
     job_id = task.get("jobId", "")
-    to_agent_id = task.get("toAgentId", "")
+    to_agent_id = task.get("fromAgentId", "")
 
     # Extract the question
     question = extract_question(content)
