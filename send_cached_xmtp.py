@@ -45,11 +45,12 @@ def send_cached_xmtp(job_id: str, to_agent_id: str):
         if result.stderr:
             print(f"stderr: {result.stderr.strip()}")
 
-        if result.returncode == 0:
+        combined = (result.stdout + result.stderr).strip()
+        if result.returncode == 0 and "ok=true" in combined:
             print(f"✅ XMTP response sent successfully for job {job_id}")
             return True
         else:
-            print(f"❌ XMTP send failed for job {job_id}")
+            print(f"❌ XMTP send failed for job {job_id}: {combined[:200]}")
             return False
     finally:
         os.unlink(msg_file)
