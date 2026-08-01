@@ -135,7 +135,25 @@ def extract_question_from_task(task):
 
 
 def send_response(job_id, to_agent_id, response_json):
-    """Send response back via XMTP using a temp file to avoid shell quoting issues."""
+    """Send response back via XMTP using a temp file to avoid shell quoting issues.
+
+    Creates an XMTP session if one does not yet exist for this job/toAgentId.
+    Falls back to ``onchainos agent user-notify`` when XMTP delivery fails
+    (e.g. the counterparty's XMTP address is not registered).
+    """
+    # Ensure an XMTP session exists for this job/toAgentId pair
+    find_out, _, _ = run_cmd(
+        f"okx-a2a session find --job-id {job_id} --to-agent-id {to_agent_id}",
+        timeout=15,
+    )
+    if "session not found" in find_out:
+        print(f"Creating XMTP session for job {job_id} → agent {to_agent_id}...")
+        run_cmd(
+            f"okx-a2a session create --job-id {job_id} --my-agent-id {AGENT_ID} "
+            f"--to-agent-id {to_agent_id} --json",
+            timeout=15,
+        )
+
     msg_obj = {"msgType": "a2a-agent-chat", "content": response_json}
     msg_str = json.dumps(msg_obj)
     # Write message to temp file and use $(cat) to avoid shell quoting issues
@@ -143,13 +161,27 @@ def send_response(job_id, to_agent_id, response_json):
         f.write(msg_str)
         msg_file = f.name
     try:
-        cmd = f'okx-a2a xmtp-send --job-id {job_id} --message "$(cat {msg_file})"'
+        cmd = f'okx-a2a xmtp-send --job-id {job_id} --to-agent-id {to_agent_id} --message "$(cat {msg_file})"'
         stdout, stderr, code = run_cmd(cmd, timeout=30)
-        if code == 0:
+        combined = (stdout + stderr).strip()
+        # okx-a2a xmtp-send may return exit code 0 even when ok=false
+        if code == 0 and "ok=true" in combined:
             print(f"Response sent successfully via XMTP for job {job_id}")
             return True
         else:
-            print(f"Failed to send XMTP response: {stderr}")
+            print(f"XMTP send failed for job {job_id}: {combined[:200]}")
+            # Fallback: notify user via onchainos agent user-notify
+            fallback_msg = (
+                f"[WatchTower] Task {job_id[:16]}… — analysis complete. "
+                f"XMTP notification unavailable (counterparty XMTP not registered). "
+                f"Please retrieve the deliverable on-chain."
+            )
+            cmd2 = f'onchainos agent user-notify --content "{fallback_msg}"'
+            r2_out, r2_err, r2_code = run_cmd(cmd2, timeout=15)
+            if r2_code == 0:
+                print(f"Fallback user notification sent for job {job_id}")
+            else:
+                print(f"Fallback notification also failed: {r2_err.strip()}")
             return False
     finally:
         os.unlink(msg_file)
@@ -259,6 +291,7 @@ def process_task(task, task_detail_map=None):
     print(f"Processing task {job_id}: {question[:100]}...")
 
     # Handle task status
+    cached_result = None
     if status_code == 0:  # "created" — awaiting acceptance
         print(f"Task {job_id} is in 'created' status (awaiting acceptance)")
         token_amount = task.get("tokenAmount", "1")
@@ -281,28 +314,53 @@ def process_task(task, task_detail_map=None):
         print("Running analysis while awaiting acceptance...")
     elif status_code == 1:  # "accepted" — ready for processing
         print(f"Task {job_id} is in 'accepted' status — processing deliverable")
+        cache_file = f"/tmp/watchtower_result_{job_id[:16]}.json"
+        if os.path.exists(cache_file):
+            print(f"Cached result found — skipping re-analysis, proceeding to delivery")
+            with open(cache_file) as f:
+                cached = json.load(f)
+            cached_result = cached["result"]
+        else:
+            cached_result = None
+    elif status_code == 2:  # "submitted" — deliverable already on-chain
+        print(f"Task {job_id} is in 'submitted' status — deliverable already on-chain")
+        cache_file = f"/tmp/watchtower_result_{job_id[:16]}.json"
+        if os.path.exists(cache_file):
+            print(f"Cached result found — sending XMTP notification (may have failed previously)")
+            with open(cache_file) as f:
+                cached = json.load(f)
+            send_response(job_id, to_agent_id, json.dumps(cached["result"]))
+            print(f"Skipping on-chain delivery — task already submitted")
+            print(f"Task {job_id} processing complete")
+            return True
+        else:
+            print(f"No cached result — re-running analysis (delivery will be skipped)")
 
-    # Run the agent (analysis)
-    stdout, stderr, code = run_cmd(
-        f'uv run python main.py "{question}"',
-        timeout=300,
-    )
+    # Run the agent (analysis) — skip if we loaded a cached result for an accepted task
+    if cached_result is not None:
+        print(f"Using cached analysis result for task {job_id}")
+        response_json = cached_result
+    else:
+        stdout, stderr, code = run_cmd(
+            f'uv run python main.py "{question}"',
+            timeout=300,
+        )
 
-    if code != 0:
-        print(f"Agent failed for task {job_id}: {stderr}")
-        error_response = json.dumps({
-            "question": question,
-            "error": f"Agent processing failed: {stderr[:200]}"
-        })
-        send_response(job_id, to_agent_id, error_response)
-        return False
+        if code != 0:
+            print(f"Agent failed for task {job_id}: {stderr}")
+            error_response = json.dumps({
+                "question": question,
+                "error": f"Agent processing failed: {stderr[:200]}"
+            })
+            send_response(job_id, to_agent_id, error_response)
+            return False
 
-    # Parse the agent output
-    response = stdout.strip()
-    try:
-        response_json = json.loads(response)
-    except json.JSONDecodeError:
-        response_json = {"result": response}
+        # Parse the agent output
+        response = stdout.strip()
+        try:
+            response_json = json.loads(response)
+        except json.JSONDecodeError:
+            response_json = {"result": response}
 
     # Save result to cache for potential later delivery
     cache_file = f"/tmp/watchtower_result_{job_id[:16]}.json"
@@ -310,7 +368,11 @@ def process_task(task, task_detail_map=None):
         json.dump({"jobId": job_id, "result": response_json, "timestamp": time.time()}, f)
 
     # Send response via XMTP and deliver on-chain
-    if status_code >= 1:
+    if status_code == 2:
+        # Already submitted on-chain — just send XMTP notification
+        send_response(job_id, to_agent_id, json.dumps(response_json))
+        print(f"Skipping on-chain delivery — task already submitted")
+    elif status_code >= 1:
         # Task is accepted — send response and deliver
         send_response(job_id, to_agent_id, json.dumps(response_json))
         deliver_result(job_id, response_json, AGENT_ID)
