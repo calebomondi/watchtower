@@ -13,3 +13,12 @@ wheels/
 .ipynb_checkpoints/
 
 .env
+
+# Extension
+
+node_modules/
+extension/node_modules/
+extension/dist/
+
+.agents
+.claude
