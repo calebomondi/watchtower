@@ -35,7 +35,7 @@ GROQ_MODELS = [
 ]
 
 QWEN_MODELS = [
-    "qwen3.7-plus",
+    # "qwen3.7-plus",
     "qwen3.7-max"
 ]
 
@@ -84,8 +84,8 @@ def _invoke_structured_with_fallback(
     """
     if providers is None:
         providers = [
-            # ("gemini", GOOGLE_MODELS), 
-            # ("groq", GROQ_MODELS), 
+            ("gemini", GOOGLE_MODELS), 
+            ("groq", GROQ_MODELS), 
             ("qwen", QWEN_MODELS)
         ]
 
