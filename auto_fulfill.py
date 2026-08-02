@@ -343,7 +343,7 @@ def process_task(task, task_detail_map=None):
     else:
         stdout, stderr, code = run_cmd(
             f'uv run python main.py "{question}"',
-            timeout=300,
+            timeout=600,
         )
 
         if code != 0:
